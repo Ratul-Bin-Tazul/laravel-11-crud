@@ -2,16 +2,16 @@
 
 namespace Tests\Feature;
 
+use App\Models\Product;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
-use App\Models\Product;
 
 class RouteTest extends TestCase
 {
     use RefreshDatabase;
 
     /**
-     * Test that the root route returns the welcome view.
+     * Test that the root route returns the welcome view
      *
      * @return void
      */
@@ -24,7 +24,7 @@ class RouteTest extends TestCase
     }
 
     /**
-     * Test that the products index route is accessible and returns a 200 status code.
+     * Test that the products index route is accessible and returns a 200 status code
      *
      * @return void
      */
@@ -36,7 +36,7 @@ class RouteTest extends TestCase
     }
 
     /**
-     * Test that the product creation form route is accessible.
+     * Test that the product creation form route is accessible
      *
      * @return void
      */
@@ -49,7 +49,7 @@ class RouteTest extends TestCase
     }
 
     /**
-     * Test that a specific product can be viewed.
+     * Test that a specific product can be viewed
      *
      * @return void
      */
@@ -65,7 +65,7 @@ class RouteTest extends TestCase
     }
 
     /**
-     * Test that the product edit form route is accessible.
+     * Test that the product edit form route is accessible
      *
      * @return void
      */
@@ -81,7 +81,7 @@ class RouteTest extends TestCase
     }
 
     /**
-     * Test that a new product can be created via the store route.
+     * Test that a new product can be created via the store route
      *
      * @return void
      */
@@ -89,19 +89,19 @@ class RouteTest extends TestCase
     {
         $productData = [
             'name' => 'Test Product',
-            'description' => 'This is a test product',
+            'description' => 'Test Description',
             'price' => 99.99,
             'quantity' => 10
         ];
 
         $response = $this->post('/products', $productData);
 
-        $response->assertStatus(302); // Redirect after successful creation
+        $response->assertStatus(302); // Redirect status
         $this->assertDatabaseHas('products', $productData);
     }
 
     /**
-     * Test that an existing product can be updated.
+     * Test that an existing product can be updated
      *
      * @return void
      */
@@ -111,19 +111,19 @@ class RouteTest extends TestCase
         
         $updatedData = [
             'name' => 'Updated Product Name',
-            'description' => 'Updated product description',
+            'description' => 'Updated Description',
             'price' => 149.99,
             'quantity' => 20
         ];
 
         $response = $this->put("/products/{$product->id}", $updatedData);
 
-        $response->assertStatus(302); // Redirect after successful update
+        $response->assertStatus(302); // Redirect status
         $this->assertDatabaseHas('products', array_merge(['id' => $product->id], $updatedData));
     }
 
     /**
-     * Test that an existing product can be deleted.
+     * Test that an existing product can be deleted
      *
      * @return void
      */
@@ -133,35 +133,32 @@ class RouteTest extends TestCase
 
         $response = $this->delete("/products/{$product->id}");
 
-        $response->assertStatus(302); // Redirect after successful deletion
+        $response->assertStatus(302); // Redirect status
         $this->assertDatabaseMissing('products', ['id' => $product->id]);
     }
 
     /**
-     * Test that requesting a non-existent product returns a 404 error.
+     * Test that requesting a non-existent product returns a 404 error
      *
      * @return void
      */
     public function test_products_show_route_returns_404_for_invalid_id()
     {
-        $nonExistentId = 9999;
-        
-        $response = $this->get("/products/{$nonExistentId}");
+        $response = $this->get('/products/999999');
 
         $response->assertStatus(404);
     }
 
     /**
-     * Test that validation errors are returned when required fields are missing.
+     * Test that validation errors are returned when required fields are missing
      *
      * @return void
      */
     public function test_products_store_route_validates_required_fields()
     {
-        // Sending empty data to trigger validation errors
         $response = $this->post('/products', []);
 
         $response->assertStatus(302); // Redirect back with errors
-        $response->assertSessionHasErrors(['name', 'price']); // Assuming these are required fields
+        $response->assertSessionHasErrors(['name', 'price']);
     }
 }
