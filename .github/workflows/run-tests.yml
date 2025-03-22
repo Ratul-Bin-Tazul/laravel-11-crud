@@ -50,6 +50,13 @@ jobs:
         run: |
           XDEBUG_MODE=coverage ./vendor/bin/phpunit --coverage-clover=coverage.xml --log-junit=test-report.xml || echo "Tests failed"
 
+      - name: Debug Coverage and Test Report Files
+        run: |
+          echo "---- Coverage XML ----"
+          cat coverage.xml || echo "coverage.xml not found"
+          echo "---- Test Report XML ----"
+          cat test-report.xml || echo "test-report.xml not found"
+
       - name: Generate Test Results JSON
         id: test-results
         run: |
@@ -74,6 +81,13 @@ jobs:
           SKIPPED=$(grep -o 'skipped="[0-9]*"' test-report.xml | head -1 | grep -o '[0-9]*' || echo "0")
           PASSED=$((TOTAL_TESTS - FAILURES - SKIPPED))
 
+          echo "Extracted values:"
+          echo "Coverage: $COVERAGE%"
+          echo "Total Tests: $TOTAL_TESTS"
+          echo "Passed: $PASSED"
+          echo "Failed: $FAILURES"
+          echo "Skipped: $SKIPPED"
+
           # Create results JSON
           cat > test-results.json << EOF
           {
@@ -88,7 +102,7 @@ jobs:
             }
           }
           EOF
-          
+
           cat test-results.json
 
       - name: Send Results to Webhook
