@@ -1,0 +1,87 @@
+name: Run Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_run_id:
+        description: 'Test Run ID'
+        required: true
+        type: string
+      branch:
+        description: 'Branch to test'
+        required: true
+        default: 'main'
+        type: string
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring, dom, fileinfo, mysql, xml
+          coverage: xdebug
+
+      - name: Copy .env
+        run: php -r "file_exists('.env') || copy('.env.example', '.env');"
+
+      - name: Install Composer dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Generate key
+        run: php artisan key:generate
+
+      - name: Directory Permissions
+        run: chmod -R 777 storage bootstrap/cache
+
+      - name: Create Database
+        run: |
+          mkdir -p database
+          touch database/database.sqlite
+
+      - name: Run Tests with Coverage
+        run: |
+          XDEBUG_MODE=coverage ./vendor/bin/phpunit --coverage-clover=coverage.xml --log-junit=test-report.xml
+
+      - name: Generate Test Results JSON
+        id: test-results
+        run: |
+          # Extract coverage percentage
+          COVERAGE=$(grep -o 'lines:\s*[0-9.]*%' coverage.xml | grep -o '[0-9.]*')
+          
+          # Parse test results
+          TOTAL_TESTS=$(grep -o 'tests="[0-9]*"' test-report.xml | head -1 | grep -o '[0-9]*')
+          FAILURES=$(grep -o 'failures="[0-9]*"' test-report.xml | head -1 | grep -o '[0-9]*')
+          SKIPPED=$(grep -o 'skipped="[0-9]*"' test-report.xml | head -1 | grep -o '[0-9]*')
+          PASSED=$((TOTAL_TESTS - FAILURES - SKIPPED))
+          
+          # Create results JSON
+          cat > test-results.json << EOF
+          {
+            "status": "completed",
+            "completed_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "results": {
+              "coverage_percentage": $COVERAGE,
+              "total_tests": $TOTAL_TESTS,
+              "passed_tests": $PASSED,
+              "failed_tests": $FAILURES,
+              "skipped_tests": $SKIPPED
+            }
+          }
+          EOF
+          
+          cat test-results.json
+
+      - name: Send Results to Webhook
+        run: |
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d @test-results.json \
+            https://githubworkflow.requestcatcher.com/
