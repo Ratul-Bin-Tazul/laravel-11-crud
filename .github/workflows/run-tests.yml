@@ -1,0 +1,139 @@
+name: Run Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_run_id:
+        description: 'Test Run ID'
+        required: true
+        type: string
+      branch:
+        description: 'Branch to test'
+        required: true
+        default: 'main'
+        type: string
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: dom, curl, libxml, mbstring, zip, pcntl, pdo, sqlite, pdo_sqlite
+          coverage: xdebug
+
+      - name: Get Composer Cache Directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: ${{ runner.os }}-composer-
+
+      - name: Install Dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Prepare Laravel Application
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+
+      - name: Run Tests with Coverage
+        id: run-tests
+        run: |
+          XDEBUG_MODE=coverage vendor/bin/phpunit --coverage-clover=coverage.xml --log-junit=test-report.xml || true
+
+      - name: Debug - Show Test Reports
+        run: |
+          echo "Coverage XML content (if exists):"
+          if [ -f coverage.xml ]; then
+            cat coverage.xml
+          else
+            echo "coverage.xml does not exist"
+          fi
+          
+          echo "\nTest Report XML content (if exists):"
+          if [ -f test-report.xml ]; then
+            cat test-report.xml
+          else
+            echo "test-report.xml does not exist"
+          fi
+
+      - name: Create Default Files If Missing
+        run: |
+          if [ ! -f coverage.xml ]; then
+            echo '<?xml version="1.0"?><coverage><project><metrics statements="0" coveredstatements="0" elements="0" coveredelements="0" /></project></coverage>' > coverage.xml
+          fi
+          
+          if [ ! -f test-report.xml ]; then
+            echo '<?xml version="1.0"?><testsuites><testsuite tests="0" assertions="0" failures="0" errors="0" skipped="0"></testsuite></testsuites>' > test-report.xml
+          fi
+
+      - name: Process Test Results
+        id: process-results
+        run: |
+          # Extract coverage percentage
+          if [ -f coverage.xml ]; then
+            COVERED=$(grep -oP 'coveredstatements="\K[^"]+'  coverage.xml || echo "0")
+            TOTAL=$(grep -oP 'statements="\K[^"]+'  coverage.xml || echo "0")
+            
+            if [ "$TOTAL" -eq "0" ]; then
+              COVERAGE_PERCENTAGE=0
+            else
+              COVERAGE_PERCENTAGE=$(echo "scale=2; 100 * $COVERED / $TOTAL" | bc -l || echo "0")
+            fi
+          else
+            COVERAGE_PERCENTAGE=0
+          fi
+          
+          # Extract test counts
+          if [ -f test-report.xml ]; then
+            TOTAL_TESTS=$(grep -oP 'tests="\K[^"]+'  test-report.xml | head -1 || echo "0")
+            FAILURES=$(grep -oP 'failures="\K[^"]+'  test-report.xml | head -1 || echo "0")
+            ERRORS=$(grep -oP 'errors="\K[^"]+'  test-report.xml | head -1 || echo "0")
+            SKIPPED=$(grep -oP 'skipped="\K[^"]+'  test-report.xml | head -1 || echo "0")
+            
+            FAILED_TESTS=$((FAILURES + ERRORS))
+            PASSED_TESTS=$((TOTAL_TESTS - FAILED_TESTS - SKIPPED))
+          else
+            TOTAL_TESTS=0
+            PASSED_TESTS=0
+            FAILED_TESTS=0
+            SKIPPED=0
+          fi
+          
+          # Set outputs
+          echo "coverage=$COVERAGE_PERCENTAGE" >> $GITHUB_OUTPUT
+          echo "total=$TOTAL_TESTS" >> $GITHUB_OUTPUT
+          echo "passed=$PASSED_TESTS" >> $GITHUB_OUTPUT
+          echo "failed=$FAILED_TESTS" >> $GITHUB_OUTPUT
+          echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
+
+      - name: Send Results to Webhook
+        run: |
+          COMPLETED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          
+          curl -X POST https://githubworkflow.requestcatcher.com/ \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"status\": \"completed\",
+              \"completed_at\": \"$COMPLETED_AT\",
+              \"test_run_id\": \"${{ github.event.inputs.test_run_id }}\",
+              \"results\": {
+                \"coverage_percentage\": ${{ steps.process-results.outputs.coverage }},
+                \"total_tests\": ${{ steps.process-results.outputs.total }},
+                \"passed_tests\": ${{ steps.process-results.outputs.passed }},
+                \"failed_tests\": ${{ steps.process-results.outputs.failed }},
+                \"skipped_tests\": ${{ steps.process-results.outputs.skipped }}
+              }
+            }"
