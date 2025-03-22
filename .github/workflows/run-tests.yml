@@ -43,67 +43,44 @@ jobs:
         php artisan key:generate
         
     - name: Run Tests with Coverage
-      run: XDEBUG_MODE=coverage vendor/bin/phpunit --coverage-clover=coverage.xml
-      
+      run: |
+        XDEBUG_MODE=coverage ./vendor/bin/phpunit --coverage-clover=coverage.xml --log-junit=test-report.xml
+        
     - name: Generate Test Results JSON
       id: test-results
       run: |
-        # Extract test counts and coverage from the PHPUnit output
-        if [ -f coverage.xml ]; then
-          COVERAGE=$(php -r '
-            $xml = new SimpleXMLElement(file_get_contents("coverage.xml"));
-            $metrics = $xml->xpath("//metrics")[0];
-            $statements = (int)$metrics["statements"];
-            $coveredstatements = (int)$metrics["coveredstatements"];
-            echo ($statements > 0) ? round(($coveredstatements / $statements) * 100, 2) : 0;
-          ')
-          
-          # Get test counts
-          TEST_RESULTS=$(php -r '
-            $xml = simplexml_load_file("./build/logs/junit.xml", "SimpleXMLElement", LIBXML_NOERROR);
-            if ($xml === false) {
-              echo json_encode([
-                "total_tests" => 0,
-                "passed_tests" => 0,
-                "failed_tests" => 0,
-                "skipped_tests" => 0
-              ]);
-              exit;
-            }
-            $testsuite = $xml->testsuite;
-            $total = (int)$testsuite["tests"];
-            $failures = (int)$testsuite["failures"];
-            $errors = (int)$testsuite["errors"];
-            $skipped = (int)$testsuite["skipped"];
-            $passed = $total - $failures - $errors - $skipped;
-            echo json_encode([
-              "total_tests" => $total,
-              "passed_tests" => $passed,
-              "failed_tests" => $failures + $errors,
-              "skipped_tests" => $skipped
-            ]);
-          ')
-          
-          # Create results JSON
-          RESULTS_JSON=$(echo $TEST_RESULTS | jq --arg coverage "$COVERAGE" \
-            '{coverage_percentage: ($coverage|tonumber), total_tests: .total_tests, passed_tests: .passed_tests, failed_tests: .failed_tests, skipped_tests: .skipped_tests}')
-          
-          echo "results=$RESULTS_JSON" >> $GITHUB_OUTPUT
-        else
-          echo "results={\"coverage_percentage\": 0, \"total_tests\": 0, \"passed_tests\": 0, \"failed_tests\": 0, \"skipped_tests\": 0}" >> $GITHUB_OUTPUT
-        fi
-      
-    - name: Call Webhook
-      run: |
-        COMPLETED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-        STATUS="${{ job.status }}"
+        # Extract coverage percentage
+        COVERAGE=$(grep -o 'lines:\s*[0-9.]*%' coverage.xml | grep -o '[0-9.]*')
         
-        curl -X POST https://githubworkflow.requestcatcher.com/ \
+        # Extract test counts
+        TOTAL_TESTS=$(grep -o 'tests="[0-9]*"' test-report.xml | head -1 | grep -o '[0-9]*')
+        FAILURES=$(grep -o 'failures="[0-9]*"' test-report.xml | head -1 | grep -o '[0-9]*')
+        ERRORS=$(grep -o 'errors="[0-9]*"' test-report.xml | head -1 | grep -o '[0-9]*')
+        SKIPPED=$(grep -o 'skipped="[0-9]*"' test-report.xml | head -1 | grep -o '[0-9]*')
+        
+        # Calculate passed tests
+        PASSED=$((TOTAL_TESTS - FAILURES - ERRORS - SKIPPED))
+        
+        # Create results JSON
+        cat > test-results.json << EOF
+        {
+          "status": "completed",
+          "completed_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+          "results": {
+            "coverage_percentage": $COVERAGE,
+            "total_tests": $TOTAL_TESTS,
+            "passed_tests": $PASSED,
+            "failed_tests": $((FAILURES + ERRORS)),
+            "skipped_tests": $SKIPPED
+          }
+        }
+        EOF
+        
+        cat test-results.json
+        
+    - name: Call Webhook with Test Results
+      run: |
+        curl -X POST \
           -H "Content-Type: application/json" \
-          -d "{
-            \"test_run_id\": \"${{ inputs.test_run_id }}\",
-            \"status\": \"$STATUS\",
-            \"completed_at\": \"$COMPLETED_AT\",
-            \"results\": ${{ steps.test-results.outputs.results }}
-          }"
-      if: always()
+          -d @test-results.json \
+          https://githubworkflow.requestcatcher.com/?test_run_id=${{ github.event.inputs.test_run_id }}
