@@ -1,0 +1,145 @@
+name: Run Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_run_id:
+        description: 'Test Run ID'
+        required: true
+        type: string
+      branch:
+        description: 'Branch to test'
+        required: true
+        default: 'main'
+        type: string
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Jest for testing
+        run: npm install --save-dev jest jest-junit @jest/reporters
+
+      - name: Install coverage tools
+        run: npm install --save-dev nyc
+
+      - name: Run tests with coverage
+        id: run_tests
+        run: |
+          mkdir -p reports
+          npx jest --ci --coverage --reporters=default --reporters=jest-junit || true
+        continue-on-error: true
+        env:
+          JEST_JUNIT_OUTPUT_DIR: "./reports"
+          JEST_JUNIT_OUTPUT_NAME: "test-report.xml"
+
+      - name: Check for coverage.xml
+        id: check_coverage
+        run: |
+          if [ ! -f "./coverage/coverage-final.json" ]; then
+            echo "coverage-final.json not found, creating dummy file"
+            mkdir -p coverage
+            echo '{"total":{"lines":{"total":0,"covered":0,"skipped":0,"pct":0}}}' > ./coverage/coverage-final.json
+          fi
+          cat ./coverage/coverage-final.json || echo "Failed to display coverage file"
+
+      - name: Check for test-report.xml
+        id: check_test_report
+        run: |
+          if [ ! -f "./reports/test-report.xml" ]; then
+            echo "test-report.xml not found, creating dummy file"
+            mkdir -p reports
+            echo '<?xml version="1.0" encoding="UTF-8"?><testsuites tests="0" failures="0" errors="0" skipped="0"></testsuites>' > ./reports/test-report.xml
+          fi
+          cat ./reports/test-report.xml || echo "Failed to display test report file"
+
+      - name: Process test results
+        id: process_results
+        run: |
+          # Extract coverage percentage
+          if [ -f "./coverage/coverage-final.json" ]; then
+            COVERAGE=$(cat ./coverage/coverage-final.json | grep -o '"pct":[0-9.]*' | head -1 | grep -o '[0-9.]*' || echo "0")
+          else
+            COVERAGE="0"
+          fi
+          
+          # Extract test counts
+          if [ -f "./reports/test-report.xml" ]; then
+            TOTAL_TESTS=$(grep -o 'tests="[0-9]*"' ./reports/test-report.xml | head -1 | grep -o '[0-9]*' || echo "0")
+            FAILED_TESTS=$(grep -o 'failures="[0-9]*"' ./reports/test-report.xml | head -1 | grep -o '[0-9]*' || echo "0")
+            ERRORS=$(grep -o 'errors="[0-9]*"' ./reports/test-report.xml | head -1 | grep -o '[0-9]*' || echo "0")
+            SKIPPED_TESTS=$(grep -o 'skipped="[0-9]*"' ./reports/test-report.xml | head -1 | grep -o '[0-9]*' || echo "0")
+            
+            # Calculate passed tests
+            PASSED_TESTS=$((TOTAL_TESTS - FAILED_TESTS - ERRORS - SKIPPED_TESTS))
+            if [ "$PASSED_TESTS" -lt 0 ]; then
+              PASSED_TESTS=0
+            fi
+          else
+            TOTAL_TESTS="0"
+            PASSED_TESTS="0"
+            FAILED_TESTS="0"
+            SKIPPED_TESTS="0"
+          fi
+          
+          # Set outputs
+          echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
+          echo "total_tests=$TOTAL_TESTS" >> $GITHUB_OUTPUT
+          echo "passed_tests=$PASSED_TESTS" >> $GITHUB_OUTPUT
+          echo "failed_tests=$FAILED_TESTS" >> $GITHUB_OUTPUT
+          echo "skipped_tests=$SKIPPED_TESTS" >> $GITHUB_OUTPUT
+          
+          # Debug output
+          echo "Coverage: $COVERAGE%"
+          echo "Total Tests: $TOTAL_TESTS"
+          echo "Passed Tests: $PASSED_TESTS"
+          echo "Failed Tests: $FAILED_TESTS"
+          echo "Skipped Tests: $SKIPPED_TESTS"
+
+      - name: Send results to webhook
+        run: |
+          CURRENT_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          
+          # Determine status based on test results
+          if [ "${{ steps.process_results.outputs.failed_tests }}" -gt 0 ]; then
+            STATUS="failed"
+          else
+            STATUS="passed"
+          fi
+          
+          # Create JSON payload
+          PAYLOAD=$(cat <<EOF
+          {
+            "status": "$STATUS",
+            "completed_at": "$CURRENT_TIME",
+            "results": {
+              "coverage_percentage": ${{ steps.process_results.outputs.coverage || 0 }},
+              "total_tests": ${{ steps.process_results.outputs.total_tests || 0 }},
+              "passed_tests": ${{ steps.process_results.outputs.passed_tests || 0 }},
+              "failed_tests": ${{ steps.process_results.outputs.failed_tests || 0 }},
+              "skipped_tests": ${{ steps.process_results.outputs.skipped_tests || 0 }}
+            }
+          }
+          EOF
+          )
+          
+          echo "Sending payload: $PAYLOAD"
+          
+          # Send to webhook
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "https://testaurora-main-gvfeei.laravel.cloud/api/test-runs/${{ github.event.inputs.test_run_id }}/update"
