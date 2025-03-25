@@ -1,4 +1,4 @@
-name: Test Results
+name: Run Tests
 
 on:
   workflow_dispatch:
@@ -13,30 +13,53 @@ on:
         default: 'main'
         type: string
 
-
 jobs:
-  generate-test-results:
+  test:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v2
-
-      - name: Set up JDK
-        uses: actions/setup-java@v2
+      - name: Checkout code
+        uses: actions/checkout@v4
         with:
-          java-version: '11'
+          ref: ${{ github.event.inputs.branch }}
 
-      - name: Install dependencies
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: dom, curl, libxml, mbstring, zip, pcntl, pdo, sqlite, pdo_sqlite, bcmath, soap, intl, gd, exif, iconv
+          coverage: xdebug
+
+      - name: Copy .env
+        run: php -r "file_exists('.env') || copy('.env.example', '.env');"
+
+      - name: Install Dependencies
+        run: composer install --no-interaction --prefer-dist --optimize-autoloader
+
+      - name: Generate key
+        run: php artisan key:generate
+
+      - name: Create Database
         run: |
-          sudo apt-get update
-          sudo apt-get install -y xmlstarlet
+          mkdir -p database
+          touch database/database.sqlite
+      - name: Run Migrations
+        env:
+          DB_CONNECTION: sqlite
+          DB_DATABASE: database/database.sqlite
+        run: php artisan migrate
 
-      - name: Run tests and generate coverage
+      - name: Run Tests with Coverage
+        env:
+          DB_CONNECTION: sqlite
+          DB_DATABASE: database/database.sqlite
         run: |
-          # Command to run your tests (adjust it as per your setup)
-          ./gradlew test jacocoTestReport
-
+          XDEBUG_MODE=coverage ./vendor/bin/phpunit --coverage-clover=coverage.xml --log-junit=test-report.xml || echo "Tests failed but continuing workflow"
+      - name: Debug Coverage and Test Report Files
+        run: |
+          echo "---- Coverage XML ----"
+          cat coverage.xml || echo "coverage.xml not found"
+          echo "---- Test Report XML ----"
+          cat test-report.xml || echo "test-report.xml not found"
       - name: Generate Test Results JSON
         id: test-results
         run: |
@@ -45,53 +68,107 @@ jobs:
             echo "Warning: coverage.xml not found. Using 0% coverage."
             echo "lines: 0.0%" > coverage.xml
           fi
-
+          
           # Ensure test-report.xml exists
           if [ ! -f test-report.xml ]; then
             echo "Warning: test-report.xml not found. Using 0 tests."
             echo '<?xml version="1.0"?><testsuites tests="0" failures="0" skipped="0"></testsuites>' > test-report.xml
           fi
-
+          
           # Extract coverage percentage safely
           COVERAGE=$(grep -o 'lines:\s*[0-9.]*%' coverage.xml | grep -o '[0-9.]*' || echo "0.0")
-
+          
           # Parse test results safely
           TOTAL_TESTS=$(grep -o 'tests="[0-9]*"' test-report.xml | head -1 | grep -o '[0-9]*' || echo "0")
           FAILURES=$(grep -o 'failures="[0-9]*"' test-report.xml | head -1 | grep -o '[0-9]*' || echo "0")
           SKIPPED=$(grep -o 'skipped="[0-9]*"' test-report.xml | head -1 | grep -o '[0-9]*' || echo "0")
           PASSED=$((TOTAL_TESTS - FAILURES - SKIPPED))
-
-          # Create a coverage breakdown by file
-          COVERAGE_BY_FILE=$(xmlstarlet fo coverage.xml | xmlstarlet sel -t -m "//file" -v "@name" -o ": " -v "sum(./metrics/coveredstatements) div sum(./metrics/statements) * 100" -n || echo "No coverage data available")
-
-          echo "Extracted values:"
-          echo "Coverage: $COVERAGE%"
-          echo "Total Tests: $TOTAL_TESTS"
-          echo "Passed: $PASSED"
-          echo "Failed: $FAILURES"
-          echo "Skipped: $SKIPPED"
-          echo "Coverage by file: $COVERAGE_BY_FILE"
-
-          # Create results JSON
+          
+          # Extract detailed coverage information from coverage.xml
+          echo "Extracting detailed coverage information..."
+          
+          # Extract file coverage details
+          FILE_COVERAGE=$(xmllint --xpath "//file" coverage.xml 2>/dev/null || echo "")
+          
+          # Parse file coverage into JSON-compatible format
+          echo "Parsing file coverage into JSON format..."
+          FILE_COVERAGE_JSON="[]"
+          
+          if [ -f coverage.xml ]; then
+            # Get total metrics from project element
+            TOTAL_FILES=$(xmllint --xpath "string(//project/metrics/@files)" coverage.xml 2>/dev/null || echo "0")
+            TOTAL_LINES=$(xmllint --xpath "string(//project/metrics/@loc)" coverage.xml 2>/dev/null || echo "0")
+            TOTAL_CLASSES=$(xmllint --xpath "string(//project/metrics/@classes)" coverage.xml 2>/dev/null || echo "0")
+            TOTAL_METHODS=$(xmllint --xpath "string(//project/metrics/@methods)" coverage.xml 2>/dev/null || echo "0")
+            TOTAL_COVERED_METHODS=$(xmllint --xpath "string(//project/metrics/@coveredmethods)" coverage.xml 2>/dev/null || echo "0")
+            TOTAL_STATEMENTS=$(xmllint --xpath "string(//project/metrics/@statements)" coverage.xml 2>/dev/null || echo "0")
+            TOTAL_COVERED_STATEMENTS=$(xmllint --xpath "string(//project/metrics/@coveredstatements)" coverage.xml 2>/dev/null || echo "0")
+            
+            # Create file coverage array by iterating over files
+            FILE_COVERAGE_JSON=$(xmllint --xpath "//file" coverage.xml 2>/dev/null | 
+              grep -o 'name="[^"]*"' | 
+              sed 's/name="\(.*\)"/\1/' | 
+              awk -F'/' '{print $NF}' | 
+              while read -r filename; do
+                # Get file metrics
+                file_path=$(xmllint --xpath "string(//file[@name='$filename']/@name)" coverage.xml 2>/dev/null || echo "")
+                file_loc=$(xmllint --xpath "string(//file[@name='$filename']/metrics/@loc)" coverage.xml 2>/dev/null || echo "0")
+                file_statements=$(xmllint --xpath "string(//file[@name='$filename']/metrics/@statements)" coverage.xml 2>/dev/null || echo "0")
+                file_covered=$(xmllint --xpath "string(//file[@name='$filename']/metrics/@coveredstatements)" coverage.xml 2>/dev/null || echo "0")
+                
+                # Calculate coverage percentage
+                if [ "$file_statements" != "0" ]; then
+                  file_coverage=$(echo "scale=1; $file_covered * 100 / $file_statements" | bc)
+                else
+                  file_coverage="0.0"
+                fi
+                
+                # Return JSON object for file
+                echo "{ \"file\": \"$filename\", \"loc\": $file_loc, \"statements\": $file_statements, \"covered\": $file_covered, \"coverage_percentage\": $file_coverage }"
+              done | jq -s . || echo "[]")
+          fi
+          
+          # Create results JSON with enhanced coverage information
           cat > test-results.json << EOF
           {
             "status": "completed",
-            "coverage": "$COVERAGE_BY_FILE",
             "completed_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
             "results": {
               "coverage_percentage": $COVERAGE,
               "total_tests": $TOTAL_TESTS,
               "passed_tests": $PASSED,
               "failed_tests": $FAILURES,
-              "skipped_tests": $SKIPPED
+              "skipped_tests": $SKIPPED,
+              "coverage_details": {
+                "total_files": $TOTAL_FILES,
+                "total_lines": $TOTAL_LINES,
+                "total_classes": $TOTAL_CLASSES,
+                "total_methods": $TOTAL_METHODS,
+                "covered_methods": $TOTAL_COVERED_METHODS,
+                "method_coverage_percentage": $(echo "scale=1; $TOTAL_COVERED_METHODS * 100 / $TOTAL_METHODS" | bc 2>/dev/null || echo "0.0"),
+                "total_statements": $TOTAL_STATEMENTS,
+                "covered_statements": $TOTAL_COVERED_STATEMENTS,
+                "statement_coverage_percentage": $(echo "scale=1; $TOTAL_COVERED_STATEMENTS * 100 / $TOTAL_STATEMENTS" | bc 2>/dev/null || echo "0.0"),
+                "file_coverage": $FILE_COVERAGE_JSON
+              }
             }
           }
           EOF
-
+          
+          echo "Generated test results JSON:"
           cat test-results.json
 
-      - name: Upload results as artifact
+      - name: Upload Test Results
         uses: actions/upload-artifact@v4
         with:
           name: test-results
           path: test-results.json
+
+      - name: Send Results to Webhook
+        env:
+          TEST_RUN_ID: ${{ github.event.inputs.test_run_id }}
+        run: |
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d @test-results.json \
+            "https://testaurora-main-gvfeei.laravel.cloud/api/test-runs/${TEST_RUN_ID}/update"
