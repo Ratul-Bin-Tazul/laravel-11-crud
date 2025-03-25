@@ -1,0 +1,147 @@
+name: Run Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_run_id:
+        description: 'Test Run ID'
+        required: true
+        type: string
+      branch:
+        description: 'Branch to test'
+        required: true
+        default: 'main'
+        type: string
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: dom, curl, libxml, mbstring, zip, pcntl, pdo, sqlite, pdo_sqlite, bcmath, soap, intl, gd, exif, iconv
+          coverage: xdebug
+
+      - name: Copy .env
+        run: php -r "file_exists('.env') || copy('.env.example', '.env');"
+
+      - name: Install Dependencies
+        run: composer install --no-interaction --prefer-dist --optimize-autoloader
+
+      - name: Generate key
+        run: php artisan key:generate
+
+      - name: Create Database
+        run: |
+          mkdir -p database
+          touch database/database.sqlite
+
+      - name: Run Migrations
+        env:
+          DB_CONNECTION: sqlite
+          DB_DATABASE: database/database.sqlite
+        run: php artisan migrate
+
+      - name: Run Tests
+        env:
+          DB_CONNECTION: sqlite
+          DB_DATABASE: database/database.sqlite
+        run: |
+          mkdir -p reports
+          php artisan test --coverage-clover=reports/coverage.xml --log-junit=reports/test-report.xml || true
+
+      - name: Debug Test Reports
+        run: |
+          echo "Checking if coverage.xml exists:"
+          if [ -f "reports/coverage.xml" ]; then
+            echo "coverage.xml exists. Content:"
+            cat reports/coverage.xml
+          else
+            echo "coverage.xml does not exist. Creating dummy file."
+            mkdir -p reports
+            echo '<?xml version="1.0" encoding="UTF-8"?><coverage generated="0" lines-valid="0" lines-covered="0" line-rate="0" branches-covered="0" branches-valid="0" branch-rate="0" complexity="0"></coverage>' > reports/coverage.xml
+          fi
+          
+          echo "Checking if test-report.xml exists:"
+          if [ -f "reports/test-report.xml" ]; then
+            echo "test-report.xml exists. Content:"
+            cat reports/test-report.xml
+          else
+            echo "test-report.xml does not exist. Creating dummy file."
+            mkdir -p reports
+            echo '<?xml version="1.0" encoding="UTF-8"?><testsuites tests="0" failures="0" errors="0" skipped="0"></testsuites>' > reports/test-report.xml
+          fi
+
+      - name: Process Test Results
+        id: process-results
+        run: |
+          # Default values
+          COVERAGE_PERCENTAGE=0
+          TOTAL_TESTS=0
+          PASSED_TESTS=0
+          FAILED_TESTS=0
+          SKIPPED_TESTS=0
+          
+          # Extract coverage percentage if file exists
+          if [ -f "reports/coverage.xml" ]; then
+            COVERAGE_LINE=$(grep -o 'line-rate="[0-9.]*"' reports/coverage.xml || echo 'line-rate="0"')
+            COVERAGE_RATE=$(echo $COVERAGE_LINE | grep -o '[0-9.]*' || echo '0')
+            COVERAGE_PERCENTAGE=$(echo "$COVERAGE_RATE * 100" | bc -l | xargs printf "%.2f" || echo "0.00")
+          fi
+          
+          # Extract test counts if file exists
+          if [ -f "reports/test-report.xml" ]; then
+            TESTS_LINE=$(grep -o 'tests="[0-9]*"' reports/test-report.xml || echo 'tests="0"')
+            TOTAL_TESTS=$(echo $TESTS_LINE | grep -o '[0-9]*' || echo '0')
+            
+            FAILURES_LINE=$(grep -o 'failures="[0-9]*"' reports/test-report.xml || echo 'failures="0"')
+            FAILURES=$(echo $FAILURES_LINE | grep -o '[0-9]*' || echo '0')
+            
+            ERRORS_LINE=$(grep -o 'errors="[0-9]*"' reports/test-report.xml || echo 'errors="0"')
+            ERRORS=$(echo $ERRORS_LINE | grep -o '[0-9]*' || echo '0')
+            
+            SKIPPED_LINE=$(grep -o 'skipped="[0-9]*"' reports/test-report.xml || echo 'skipped="0"')
+            SKIPPED_TESTS=$(echo $SKIPPED_LINE | grep -o '[0-9]*' || echo '0')
+            
+            FAILED_TESTS=$((FAILURES + ERRORS))
+            PASSED_TESTS=$((TOTAL_TESTS - FAILED_TESTS - SKIPPED_TESTS))
+          fi
+          
+          # Create results JSON
+          cat > test-results.json << EOF
+          {
+            "status": "completed",
+            "completed_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "results": {
+              "coverage_percentage": $COVERAGE_PERCENTAGE,
+              "total_tests": $TOTAL_TESTS,
+              "passed_tests": $PASSED_TESTS,
+              "failed_tests": $FAILED_TESTS,
+              "skipped_tests": $SKIPPED_TESTS
+            }
+          }
+          EOF
+          
+          cat test-results.json
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results
+          path: test-results.json
+
+      - name: Send Results to Webhook
+        env:
+          TEST_RUN_ID: ${{ github.event.inputs.test_run_id }}
+        run: |
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d @test-results.json \
+            "https://testaurora-main-gvfeei.laravel.cloud/api/test-runs/${TEST_RUN_ID}/update"
