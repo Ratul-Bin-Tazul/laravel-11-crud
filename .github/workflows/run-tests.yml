@@ -42,7 +42,6 @@ jobs:
         run: |
           mkdir -p database
           touch database/database.sqlite
-
       - name: Run Migrations
         env:
           DB_CONNECTION: sqlite
@@ -57,80 +56,57 @@ jobs:
           mkdir -p reports
           php artisan test --coverage-clover=reports/coverage.xml --log-junit=reports/test-report.xml || true
 
-      - name: Debug Test Reports
+      - name: Run Tests with Coverage
         run: |
-          echo "Checking if coverage.xml exists:"
-          if [ -f "reports/coverage.xml" ]; then
-            echo "coverage.xml exists. Content:"
-            cat reports/coverage.xml
-          else
-            echo "coverage.xml does not exist. Creating dummy file."
-            mkdir -p reports
-            echo '<?xml version="1.0" encoding="UTF-8"?><coverage generated="0" lines-valid="0" lines-covered="0" line-rate="0" branches-covered="0" branches-valid="0" branch-rate="0" complexity="0"></coverage>' > reports/coverage.xml
-          fi
-          
-          echo "Checking if test-report.xml exists:"
-          if [ -f "reports/test-report.xml" ]; then
-            echo "test-report.xml exists. Content:"
-            cat reports/test-report.xml
-          else
-            echo "test-report.xml does not exist. Creating dummy file."
-            mkdir -p reports
-            echo '<?xml version="1.0" encoding="UTF-8"?><testsuites tests="0" failures="0" errors="0" skipped="0"></testsuites>' > reports/test-report.xml
-          fi
-
-      - name: Process Test Results
-        id: process-results
+          XDEBUG_MODE=coverage ./vendor/bin/phpunit --coverage-clover=coverage.xml --log-junit=test-report.xml || echo "Tests failed"
+      - name: Debug Coverage and Test Report Files
         run: |
-          # Default values
-          COVERAGE_PERCENTAGE=0
-          TOTAL_TESTS=0
-          PASSED_TESTS=0
-          FAILED_TESTS=0
-          SKIPPED_TESTS=0
-          
-          # Extract coverage percentage if file exists
-          if [ -f "reports/coverage.xml" ]; then
-            COVERAGE_LINE=$(grep -o 'line-rate="[0-9.]*"' reports/coverage.xml || echo 'line-rate="0"')
-            COVERAGE_RATE=$(echo $COVERAGE_LINE | grep -o '[0-9.]*' || echo '0')
-            COVERAGE_PERCENTAGE=$(echo "$COVERAGE_RATE * 100" | bc -l | xargs printf "%.2f" || echo "0.00")
+          echo "---- Coverage XML ----"
+          cat coverage.xml || echo "coverage.xml not found"
+          echo "---- Test Report XML ----"
+          cat test-report.xml || echo "test-report.xml not found"
+      - name: Generate Test Results JSON
+        id: test-results
+        run: |
+          # Ensure coverage.xml exists
+          if [ ! -f coverage.xml ]; then
+            echo "Warning: coverage.xml not found. Using 0% coverage."
+            echo "lines: 0.0%" > coverage.xml
           fi
-          
-          # Extract test counts if file exists
-          if [ -f "reports/test-report.xml" ]; then
-            TESTS_LINE=$(grep -o 'tests="[0-9]*"' reports/test-report.xml || echo 'tests="0"')
-            TOTAL_TESTS=$(echo $TESTS_LINE | grep -o '[0-9]*' || echo '0')
-            
-            FAILURES_LINE=$(grep -o 'failures="[0-9]*"' reports/test-report.xml || echo 'failures="0"')
-            FAILURES=$(echo $FAILURES_LINE | grep -o '[0-9]*' || echo '0')
-            
-            ERRORS_LINE=$(grep -o 'errors="[0-9]*"' reports/test-report.xml || echo 'errors="0"')
-            ERRORS=$(echo $ERRORS_LINE | grep -o '[0-9]*' || echo '0')
-            
-            SKIPPED_LINE=$(grep -o 'skipped="[0-9]*"' reports/test-report.xml || echo 'skipped="0"')
-            SKIPPED_TESTS=$(echo $SKIPPED_LINE | grep -o '[0-9]*' || echo '0')
-            
-            FAILED_TESTS=$((FAILURES + ERRORS))
-            PASSED_TESTS=$((TOTAL_TESTS - FAILED_TESTS - SKIPPED_TESTS))
+          # Ensure test-report.xml exists
+          if [ ! -f test-report.xml ]; then
+            echo "Warning: test-report.xml not found. Using 0 tests."
+            echo '<?xml version="1.0"?><testsuites tests="0" failures="0" skipped="0"></testsuites>' > test-report.xml
           fi
-          
+          # Extract coverage percentage safely
+          COVERAGE=$(grep -o 'lines:\s*[0-9.]*%' coverage.xml | grep -o '[0-9.]*' || echo "0.0")
+          # Parse test results safely
+          TOTAL_TESTS=$(grep -o 'tests="[0-9]*"' test-report.xml | head -1 | grep -o '[0-9]*' || echo "0")
+          FAILURES=$(grep -o 'failures="[0-9]*"' test-report.xml | head -1 | grep -o '[0-9]*' || echo "0")
+          SKIPPED=$(grep -o 'skipped="[0-9]*"' test-report.xml | head -1 | grep -o '[0-9]*' || echo "0")
+          PASSED=$((TOTAL_TESTS - FAILURES - SKIPPED))
+          echo "Extracted values:"
+          echo "Coverage: $COVERAGE%"
+          echo "Total Tests: $TOTAL_TESTS"
+          echo "Passed: $PASSED"
+          echo "Failed: $FAILURES"
+          echo "Skipped: $SKIPPED"
           # Create results JSON
           cat > test-results.json << EOF
           {
             "status": "completed",
             "completed_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
             "results": {
-              "coverage_percentage": $COVERAGE_PERCENTAGE,
+              "coverage_percentage": $COVERAGE,
               "total_tests": $TOTAL_TESTS,
-              "passed_tests": $PASSED_TESTS,
-              "failed_tests": $FAILED_TESTS,
-              "skipped_tests": $SKIPPED_TESTS
+              "passed_tests": $PASSED,
+              "failed_tests": $FAILURES,
+              "skipped_tests": $SKIPPED
             }
           }
           EOF
-          
           cat test-results.json
-
+          
       - name: Upload Test Results
         uses: actions/upload-artifact@v4
         with:
