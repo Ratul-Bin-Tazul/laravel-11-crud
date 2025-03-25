@@ -1,12 +1,18 @@
 name: Test Results
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+  workflow_dispatch:
+    inputs:
+      test_run_id:
+        description: 'Test Run ID'
+        required: true
+        type: string
+      branch:
+        description: 'Branch to test'
+        required: true
+        default: 'main'
+        type: string
+
 
 jobs:
   generate-test-results:
